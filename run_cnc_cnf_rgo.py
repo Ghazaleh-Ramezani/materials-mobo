@@ -10,7 +10,7 @@ RESULTS = Path(__file__).parent/"results_cnc"; RESULTS.mkdir(exist_ok=True)
 DATA = Path(__file__).parent/"data"/"cnc_cnf_rgo_data.csv"
 
 def main():
-    obj = LassoSurrogateObjective(DATA, agent="lascorbic", objectives=("conductivity","tensile"), surrogate="lasso")
+    obj = LassoSurrogateObjective(DATA, agent="lascorbic", objectives=("conductivity","tensile"))
     init_x = feasible_initial_design(n=5, seed=0)
     ref_point = obj.ref_point(init_x)
     cfg = MOBOConfig(bounds=INPUT_BOUNDS, ref_point=ref_point, n_initial=5, n_iterations=10, seed=0)
