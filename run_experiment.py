@@ -1,49 +1,133 @@
+"""MOBO vs random search on the synthetic 3-objective SPM benchmark.
 
+Both arms start from the same evaluated Sobol design and get the same budget,
+so each seed is a paired comparison. Writes results/summary.json (every curve
+and the summary statistics behind the README table) and results/hypervolume.svg.
+
+    python run_experiment.py --seeds 10
+"""
+
+from __future__ import annotations
+
+import argparse
 import dataclasses
+import json
+import platform
 from pathlib import Path
-import matplotlib; matplotlib.use("Agg")
-import matplotlib.pyplot as plt, torch
-from botorch.utils.multi_objective.box_decompositions.dominated import DominatedPartitioning
-from botorch.utils.multi_objective.pareto import is_non_dominated
-from botorch.utils.sampling import draw_sobol_samples
-from mobo_core import MOBOConfig, run_mobo, select_with_preference
-from objectives import SPM_BOUNDS, SPM_REF_POINT, spm_imaging_objective
-RESULTS = Path(__file__).parent/"results"; RESULTS.mkdir(exist_ok=True)
-OBJ_NAMES = ["Quality","Reproducibility","Efficiency"]
 
-def random_baseline(cfg):
-    total = cfg.n_initial+cfg.n_iterations*cfg.batch_size
-    x = draw_sobol_samples(bounds=cfg.bounds,n=total,q=1,seed=cfg.seed+1).squeeze(1)
-    y = spm_imaging_objective(x)
-    return [DominatedPartitioning(ref_point=cfg.ref_point,Y=y[:k]).compute_hypervolume().item()
-            for k in range(cfg.n_initial,total+1)]
+import matplotlib
 
-def main():
-    cfg = MOBOConfig(bounds=SPM_BOUNDS,ref_point=SPM_REF_POINT,n_initial=10,n_iterations=18,seed=0)
-    print("=== MOBO vs random (3 seeds) ===")
-    mobo_curves,rand_curves,last_hist=[],[],None
-    for s in range(3):
-        c = dataclasses.replace(cfg,seed=s,verbose=(s==0))
-        hist = run_mobo(spm_imaging_objective,c)
-        mobo_curves.append(hist.hypervolume); rand_curves.append(random_baseline(c)); last_hist=hist
-        print(f"  seed {s}: MOBO={hist.hypervolume[-1]:.4f}  random={rand_curves[-1][-1]:.4f}")
-    mc,rc = torch.tensor(mobo_curves),torch.tensor(rand_curves)
-    n_eval = [cfg.n_initial+i for i in range(mc.shape[1])]
-    fig,ax = plt.subplots(figsize=(7,4.5))
-    ax.plot(n_eval,mc.mean(0),"o-",lw=2,label="MOBO (qLogEHVI)")
-    ax.fill_between(n_eval,mc.mean(0)-mc.std(0),mc.mean(0)+mc.std(0),alpha=0.2)
-    ax.plot(list(range(cfg.n_initial,cfg.n_initial+rc.shape[1])),rc.mean(0),"s--",lw=1.8,color="gray",label="Random")
-    ax.fill_between(list(range(cfg.n_initial,cfg.n_initial+rc.shape[1])),rc.mean(0)-rc.std(0),rc.mean(0)+rc.std(0),alpha=0.15,color="gray")
-    ax.set_xlabel("Experiments"); ax.set_ylabel("Hypervolume"); ax.set_title("MOBO vs Random"); ax.legend(); ax.grid(alpha=0.3)
-    fig.tight_layout(); fig.savefig(RESULTS/"hypervolume.png",dpi=140); plt.close(fig)
-    all_y=last_hist.train_y; mask=last_hist.pareto_mask()
-    fig,axes=plt.subplots(1,3,figsize=(15,4.5))
-    for ax,(i,j) in zip(axes,[(0,1),(0,2),(1,2)]):
-        ax.scatter(all_y[~mask,i],all_y[~mask,j],c="lightgray",s=30,label="dominated")
-        ax.scatter(all_y[mask,i],all_y[mask,j],c="crimson",s=60,edgecolor="k",label="Pareto",zorder=3)
-        ax.set_xlabel(OBJ_NAMES[i]); ax.set_ylabel(OBJ_NAMES[j]); ax.grid(alpha=0.3)
-    axes[0].legend(); fig.suptitle("Pareto front"); fig.tight_layout()
-    fig.savefig(RESULTS/"pareto_front.png",dpi=140); plt.close(fig)
-    print("Done! See results/")
+matplotlib.use("Agg")
+matplotlib.rcParams.update({"svg.fonttype": "none", "svg.hashsalt": "materials-mobo"})
+import botorch  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import torch  # noqa: E402
 
-if __name__=="__main__": main()
+from mobo_core import MOBOConfig, initial_design, run_mobo, run_random  # noqa: E402
+from objectives import SPM_BOUNDS, SPM_REF_POINT, spm_imaging_objective  # noqa: E402
+
+RESULTS = Path(__file__).parent / "results"
+
+
+def evaluations_to_reach(curve: list[float], target: float, n_initial: int) -> int | None:
+    """Total evaluations (initial design included) at which `curve` first
+    reaches `target`; None if it never does."""
+    for k, hv in enumerate(curve):
+        if hv >= target:
+            return n_initial + k
+    return None
+
+
+def summarise(mobo: torch.Tensor, rand: torch.Tensor, n_initial: int) -> dict:
+    final_m, final_r = mobo[:, -1], rand[:, -1]
+    diff = final_m - final_r
+    target = final_r.mean().item()
+    mean_curve = mobo.mean(0).tolist()
+    per_seed = [evaluations_to_reach(c, target, n_initial) for c in mobo.tolist()]
+    return {
+        "mobo_final_hv_mean": final_m.mean().item(),
+        "mobo_final_hv_std": final_m.std().item(),
+        "random_final_hv_mean": final_r.mean().item(),
+        "random_final_hv_std": final_r.std().item(),
+        "paired_diff_mean": diff.mean().item(),
+        "paired_diff_std": diff.std().item(),
+        "seeds_mobo_ahead": int((diff > 0).sum()),
+        "n_seeds": int(mobo.shape[0]),
+        "budget_evaluations": n_initial + mobo.shape[1] - 1,
+        "target_hv": target,
+        "mean_curve_evaluations_to_target": evaluations_to_reach(mean_curve, target, n_initial),
+        "per_seed_evaluations_to_target": per_seed,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--seeds", type=int, default=10)
+    parser.add_argument("--n-initial", type=int, default=10)
+    parser.add_argument("--iterations", type=int, default=18)
+    args = parser.parse_args()
+    RESULTS.mkdir(exist_ok=True)
+
+    cfg = MOBOConfig(
+        bounds=SPM_BOUNDS,
+        ref_point=SPM_REF_POINT,
+        n_initial=args.n_initial,
+        n_iterations=args.iterations,
+    )
+    mobo_curves, rand_curves = [], []
+    for s in range(args.seeds):
+        c = dataclasses.replace(cfg, seed=s, verbose=False)
+        torch.manual_seed(s)
+        x0 = initial_design(c.bounds, c.n_initial, s)
+        y0 = spm_imaging_objective(x0)
+        hist = run_mobo(spm_imaging_objective, c, initial_x=x0, initial_y=y0)
+        rand = run_random(spm_imaging_objective, c, x0, y0)
+        mobo_curves.append(hist.hypervolume)
+        rand_curves.append(rand)
+        print(f"seed {s}: MOBO={hist.hypervolume[-1]:.4f}  random={rand[-1]:.4f}", flush=True)
+
+    mc, rc = torch.tensor(mobo_curves), torch.tensor(rand_curves)
+    summary = summarise(mc, rc, cfg.n_initial)
+    print(json.dumps(summary, indent=2))
+    out = {
+        "benchmark": "spm_imaging_objective (5 inputs, 3 objectives, noise_std 0.02)",
+        "config": {
+            "n_initial": cfg.n_initial,
+            "n_iterations": cfg.n_iterations,
+            "batch_size": cfg.batch_size,
+            "mc_samples": cfg.mc_samples,
+            "num_restarts": cfg.num_restarts,
+            "raw_samples": cfg.raw_samples,
+            "ref_point": cfg.ref_point.tolist(),
+        },
+        "summary": summary,
+        "mobo_curves": mobo_curves,
+        "random_curves": rand_curves,
+        "environment": {
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "botorch": botorch.__version__,
+        },
+    }
+    (RESULTS / "summary.json").write_text(json.dumps(out, indent=2) + "\n")
+
+    n_eval = [cfg.n_initial + i for i in range(mc.shape[1])]
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for curves, label, style, color in [(mc, "MOBO (qLogEHVI)", "o-", "C0"), (rc, "Random", "s--", "gray")]:
+        m, sd = curves.mean(0), curves.std(0)
+        ax.plot(n_eval, m, style, lw=2, color=color, label=label)
+        ax.fill_between(n_eval, m - sd, m + sd, alpha=0.18, color=color)
+    ax.set_xlabel("Experiments")
+    ax.set_ylabel("Hypervolume")
+    ax.set_title(f"MOBO vs random, mean ± std over {args.seeds} seeds")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(RESULTS / "hypervolume.svg", metadata={"Date": None})
+    plt.close(fig)
+
+    print("wrote results/summary.json, results/hypervolume.svg")
+
+
+if __name__ == "__main__":
+    main()
