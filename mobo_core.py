@@ -10,7 +10,10 @@ and it is used for that below.
 
 from __future__ import annotations
 
+import io
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 from botorch.acquisition.multi_objective.logei import qLogExpectedHypervolumeImprovement
@@ -168,3 +171,12 @@ def select_with_preference(pareto_y, pareto_x, weights):
     w = weights / weights.sum()
     best = int(torch.argmax((y_norm * w).sum(dim=1)))
     return pareto_x[best], pareto_y[best], best
+
+
+def save_svg(fig, path) -> None:
+    """Write `fig` as SVG with trailing whitespace removed from every line, so
+    the file is stable text that diffs cleanly between runs. Pair with
+    matplotlib rcParams svg.hashsalt and metadata={"Date": None}."""
+    buf = io.StringIO()
+    fig.savefig(buf, format="svg", metadata={"Date": None})
+    Path(path).write_text(re.sub(r"[ \t]+\n", "\n", buf.getvalue()), encoding="utf-8")

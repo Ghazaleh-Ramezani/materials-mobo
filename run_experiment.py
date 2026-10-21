@@ -23,7 +23,7 @@ import botorch  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import torch  # noqa: E402
 
-from mobo_core import MOBOConfig, initial_design, run_mobo, run_random  # noqa: E402
+from mobo_core import MOBOConfig, initial_design, run_mobo, run_random, save_svg  # noqa: E402
 from objectives import SPM_BOUNDS, SPM_REF_POINT, spm_imaging_objective  # noqa: E402
 
 RESULTS = Path(__file__).parent / "results"
@@ -123,7 +123,7 @@ def main() -> None:
     ax.legend()
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(RESULTS / "hypervolume.svg", metadata={"Date": None})
+    save_svg(fig, RESULTS / "hypervolume.svg")
     plt.close(fig)
 
     print("wrote results/summary.json, results/hypervolume.svg")
