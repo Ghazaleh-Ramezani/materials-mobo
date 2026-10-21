@@ -28,6 +28,7 @@ from mobo_core import (  # noqa: E402
     initial_design,
     run_mobo,
     run_random,
+    save_svg,
     select_with_preference,
 )
 
@@ -116,7 +117,7 @@ def main() -> None:
     ax.legend()
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(RESULTS / "pareto_cnc_cnf_rgo.svg", metadata={"Date": None})
+    save_svg(fig, RESULTS / "pareto_cnc_cnf_rgo.svg")
     plt.close(fig)
     print("wrote results_cnc/summary.json, results_cnc/pareto_cnc_cnf_rgo.svg")
 
